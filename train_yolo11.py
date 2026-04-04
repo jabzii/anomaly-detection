@@ -23,10 +23,19 @@ RUNS_DIR     = BASE_DIR / "runs" / "train"
 # Fast mode: export FAST_TRAIN=1 for quickest turnaround
 FAST_TRAIN = os.getenv("FAST_TRAIN", "1") == "1"
 
+# YOLOv11 variant: n, s, m, l, x (default: l)
+YOLOV11_VARIANT = os.getenv("YOLOV11_VARIANT", "l").strip().lower()
+if YOLOV11_VARIANT not in {"n", "s", "m", "l", "x"}:
+    print(f"[WARN] Invalid YOLOV11_VARIANT='{YOLOV11_VARIANT}', using 'l'.")
+    YOLOV11_VARIANT = "l"
+
+MODEL_NAME = f"yolo11{YOLOV11_VARIANT}.pt"
+RUN_NAME = f"yolo11{YOLOV11_VARIANT}_wildlife_fire"
+
 # ─────────────────────────────── HYPERPARAMETERS ──────────────────────────────
 CONFIG = {
     # ── Model ─────────────────────────────────────────────────────────────────
-    "model"       : "yolo11n.pt" if FAST_TRAIN else "yolo11l.pt",  # nano is much faster
+    "model"       : MODEL_NAME,  # explicit YOLOv11 model
     "data"        : str(DATASET_YAML),  # dataset config
 
     # ── Core training ─────────────────────────────────────────────────────────
@@ -77,7 +86,7 @@ CONFIG = {
     "plots"       : False if FAST_TRAIN else True,
     "verbose"     : True,
     "project"     : str(RUNS_DIR),
-    "name"        : "yolo11l_wildlife_fire",
+    "name"        : RUN_NAME,
     "exist_ok"    : True,
 
     # ── Device ────────────────────────────────────────────────────────────────
@@ -204,7 +213,7 @@ def main():
         print("\n[INFO] Skipping test evaluation (missing best.pt or test split).")
 
     # ── Convenience copy of best model to project root ─────────────────────────
-    dest = BASE_DIR / "best_yolo11l_wildlife_fire.pt"
+    dest = BASE_DIR / f"best_{RUN_NAME}.pt"
     if best_pt.exists():
         shutil.copy2(best_pt, dest)
         print(f"\n  Best model copied to: {dest}")
