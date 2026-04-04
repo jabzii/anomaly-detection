@@ -45,3 +45,6 @@ master_dataset.zip
 .vscode/
 .idea/
 .DS_Store
+
+# Secrets
+.env

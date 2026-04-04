@@ -14,6 +14,11 @@ from flask import Flask, Response, render_template, request, jsonify
 from ultralytics import YOLO
 import werkzeug
 
+try:
+    from twilio.rest import Client
+except Exception:
+    Client = None
+
 # ─────────────────────────────── CONFIG ───────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "runs" / "train" / "yolo11l_wildlife_fire" / "weights" / "best.pt"
@@ -21,6 +26,12 @@ UPLOAD_FOLDER = BASE_DIR / "uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 CONFIDENCE_THRESHOLD = 0.05  # VERY low for debugging
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
+ALERT_TO_PHONE_NUMBER = os.getenv("ALERT_TO_PHONE_NUMBER", "")
+SMS_COOLDOWN_SECONDS = int(os.getenv("SMS_COOLDOWN_SECONDS", "60"))
 
 FIRE_CLASSES  = {"fire", "smoke"}
 ANIMAL_CLASSES = {"buffalo", "elephant", "tiger", "wild_boar"}
@@ -62,6 +73,9 @@ class DetectionState:
         self._fps_count = 0
         self.fps: float = 0.0
 
+        self.last_fire_alert_ts: float = 0.0
+        self.fire_alert_sent_for_current_event: bool = False
+
     def update_fps(self):
         self._fps_count += 1
         now = time.time()
@@ -72,6 +86,43 @@ class DetectionState:
             self._fps_t = now
 
 state = DetectionState()
+
+
+def twilio_ready() -> bool:
+    return bool(
+        Client is not None
+        and TWILIO_ACCOUNT_SID
+        and TWILIO_AUTH_TOKEN
+        and TWILIO_PHONE_NUMBER
+        and ALERT_TO_PHONE_NUMBER
+    )
+
+
+def send_fire_sms_async(detections: list, source: str):
+    """Send Twilio SMS in background thread when fire/smoke is detected."""
+    if not twilio_ready():
+        print("[WARN] SMS not sent: Twilio not configured or package missing.")
+        return
+
+    try:
+        fire_labels = [d.get("label", "fire") for d in detections if d.get("label") in FIRE_CLASSES]
+        fire_label = fire_labels[0] if fire_labels else "fire"
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        msg = (
+            f"ALERT: {fire_label.upper()} detected. "
+            f"Source: {source}. Time: {timestamp}. "
+            f"Confidence threshold: {CONFIDENCE_THRESHOLD}."
+        )
+
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        sms = client.messages.create(
+            body=msg,
+            from_=TWILIO_PHONE_NUMBER,
+            to=ALERT_TO_PHONE_NUMBER,
+        )
+        print(f"[INFO] Fire SMS sent. SID: {sms.sid}")
+    except Exception as e:
+        print(f"[ERROR] Failed to send fire SMS: {e}")
 
 # ─────────────────────────────── LOAD MODEL ───────────────────────────────────
 print(f"[INFO] Loading model from: {MODEL_PATH}")
@@ -158,11 +209,32 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
             cv2.rectangle(plotted_frame, (0, 0), (plotted_frame.shape[1], 50), (0, 0, 255), -1)
             cv2.putText(plotted_frame, "!!! FIRE DETECTED !!!", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
+        trigger_sms = False
         with state.lock:
             state.fire_detected = fire_det
             state.animal_detected = animal_det
             state.confidence = max_conf * 100
             state.detections = frame_detections
+
+            now = time.time()
+            cooldown_ok = (now - state.last_fire_alert_ts) >= SMS_COOLDOWN_SECONDS
+
+            if fire_det and not state.fire_alert_sent_for_current_event and cooldown_ok:
+                state.last_fire_alert_ts = now
+                state.fire_alert_sent_for_current_event = True
+                trigger_sms = True
+
+            if not fire_det:
+                state.fire_alert_sent_for_current_event = False
+
+            current_source = state.source
+
+        if trigger_sms:
+            threading.Thread(
+                target=send_fire_sms_async,
+                args=(frame_detections, current_source),
+                daemon=True,
+            ).start()
 
         return plotted_frame
     except Exception as e:
