@@ -28,6 +28,22 @@ ANIMAL_CLASSES = {"buffalo", "elephant", "tiger", "wild_boar"}
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB
 
+
+def resolve_model_path() -> Path:
+    """Find best available detection weights."""
+    if MODEL_PATH.exists():
+        return MODEL_PATH
+
+    candidates = sorted((BASE_DIR / "runs" / "train").glob("*/weights/best.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        return candidates[0]
+
+    fallback = BASE_DIR / "best_yolo11l_wildlife_fire.pt"
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError(f"No model weights found. Tried: {MODEL_PATH}, runs/train/*/weights/best.pt, {fallback}")
+
 # ─────────────────────────────── GLOBAL STATE ─────────────────────────────────
 class DetectionState:
     def __init__(self):
@@ -59,21 +75,32 @@ state = DetectionState()
 
 # ─────────────────────────────── LOAD MODEL ───────────────────────────────────
 print(f"[INFO] Loading model from: {MODEL_PATH}")
-if not MODEL_PATH.exists():
-    print(f"[ERROR] Weights missing at {MODEL_PATH}")
-
-model = YOLO(str(MODEL_PATH))
-print(f"[INFO] Model loaded ✓. Classes: {model.names}")
+try:
+    model_file = resolve_model_path()
+    print(f"[INFO] Using weights: {model_file}")
+    model = YOLO(str(model_file))
+    print(f"[INFO] Model loaded ✓. Classes: {model.names}")
+except Exception as e:
+    print(f"[ERROR] Could not load model: {e}")
+    sys.exit(1)
 
 # ─────────────────────────────── FRAME GENERATOR ─────────────────────────────
 
 def process_frame(frame: np.ndarray) -> np.ndarray:
     try:
-        results = model(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)[0]
+        if frame is None or frame.size == 0:
+            return np.zeros((480, 640, 3), dtype=np.uint8)
+
+        results = model.predict(
+            source=frame,
+            conf=CONFIDENCE_THRESHOLD,
+            imgsz=640,
+            verbose=False,
+        )[0]
         num_boxes = len(results.boxes)
-        
-        # Draw everything using YOLO's built-in plotter
-        plotted_frame = results.plot()
+
+        # Manual plotting for reliability in OpenCV stream
+        plotted_frame = frame.copy()
 
         fire_det = False
         animal_det = False
@@ -86,12 +113,34 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
             label  = model.names.get(cls_id, f"cls{cls_id}")
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
+            should_draw = False
+            color = (0, 255, 0)
+
             if label in FIRE_CLASSES:
                 fire_det = True
+                should_draw = True
+                color = (0, 0, 255)
                 print(f"[INFO] FIRE! {label} ({conf:.2f})")
             if label in ANIMAL_CLASSES and state.animal_detection_enabled:
                 animal_det = True
+                should_draw = True
+                color = (255, 180, 0)
                 print(f"[INFO] ANIMAL! {label} ({conf:.2f})")
+
+            if label not in FIRE_CLASSES and label not in ANIMAL_CLASSES:
+                should_draw = True
+
+            if should_draw:
+                cv2.rectangle(plotted_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(
+                    plotted_frame,
+                    f"{label} {conf:.2f}",
+                    (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    color,
+                    2,
+                )
 
             max_conf = max(max_conf, conf)
             frame_detections.append({
@@ -157,6 +206,10 @@ def start_camera():
     with state.lock:
         if state.cap: state.cap.release()
         state.cap = cv2.VideoCapture(int(idx))
+        if not state.cap.isOpened():
+            state.cap = None
+            state.running = False
+            return jsonify({"error": f"Cannot open camera index {idx}"}), 400
         state.running, state.source = True, "camera"
     return jsonify({"status": "ok"})
 
@@ -169,6 +222,10 @@ def upload():
     with state.lock:
         if state.cap: state.cap.release()
         state.cap = cv2.VideoCapture(str(save_path))
+        if not state.cap.isOpened():
+            state.cap = None
+            state.running = False
+            return jsonify({"error": "Cannot open uploaded video (codec/format unsupported)"}), 400
         state.running, state.source = True, "video"
     return jsonify({"status": "ok"})
 
@@ -178,28 +235,35 @@ def stop():
     with state.lock:
         state.running = False
         if state.cap: state.cap.release(); state.cap = None
+        state.fire_detected = False
+        state.animal_detected = False
+        state.confidence = 0.0
+        state.detections = []
     return jsonify({"status": "stopped"})
 
 @app.route("/status")
 def get_status():
     with state.lock:
         return jsonify({
+            "running": state.running,
+            "source": state.source,
             "fire_detected": state.fire_detected,
             "animal_detected": state.animal_detected,
             "confidence": state.confidence,
             "detections": state.detections,
-            "fps": round(state.fps, 1)
+            "fps": round(state.fps, 1),
+            "animal_detection_enabled": state.animal_detection_enabled,
         })
 
 @app.route("/enable_animal_detection", methods=["POST"])
 def enable():
     with state.lock: state.animal_detection_enabled = True
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": "Animal detection enabled"})
 
 @app.route("/disable_animal_detection", methods=["POST"])
 def disable():
     with state.lock: state.animal_detection_enabled = False
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "message": "Animal detection disabled"})
 
 if __name__ == "__main__":
     print("Server starting...")
