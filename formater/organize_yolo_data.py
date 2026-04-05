@@ -3,8 +3,6 @@ import shutil
 import random
 import glob
 
-# This script merges all internal subsets into a single YOLO format ready for training safely mapping classes.
-# Avoids class ID overlapping (e.g. Tiger Class 0 vs Elephant Class 0).
 
 datasets_config = [
     {"name": "buffalo", "path": "datasets/buffalo", "class_map": {0: 0}},
