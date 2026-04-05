@@ -13,7 +13,7 @@ datasets_config = [
 ]
 
 class_names = ["smoke", "fire", "buffalo", "elephant", "tiger", "wild_boar"]
-output_dir = "datasets/master_dataset"
+output_dir = "master_dataset"
 
 train_ratio = 0.7
 val_ratio = 0.2
