@@ -23,23 +23,14 @@ RUNS_DIR     = BASE_DIR / "runs" / "train"
 # Fast mode: export FAST_TRAIN=1 for quickest turnaround
 FAST_TRAIN = os.getenv("FAST_TRAIN", "1") == "1"
 
-# YOLOv11 variant: n, s, m, l, x (default: l)
-YOLOV11_VARIANT = os.getenv("YOLOV11_VARIANT", "l").strip().lower()
-if YOLOV11_VARIANT not in {"n", "s", "m", "l", "x"}:
-    print(f"[WARN] Invalid YOLOV11_VARIANT='{YOLOV11_VARIANT}', using 'l'.")
-    YOLOV11_VARIANT = "l"
-
-MODEL_NAME = f"yolo11{YOLOV11_VARIANT}.pt"
-RUN_NAME = f"yolo11{YOLOV11_VARIANT}_wildlife_fire"
-
 # ─────────────────────────────── HYPERPARAMETERS ──────────────────────────────
 CONFIG = {
     # ── Model ─────────────────────────────────────────────────────────────────
-    "model"       : MODEL_NAME,  # explicit YOLOv11 model
+    "model"       : "yolo11n.pt" if FAST_TRAIN else "yolo11l.pt",  # nano is much faster
     "data"        : str(DATASET_YAML),  # dataset config
 
     # ── Core training ─────────────────────────────────────────────────────────
-    "epochs"      : 20 if FAST_TRAIN else 100,
+    "epochs"      : 20 if FAST_TRAIN else 1000,
     "imgsz"       : 416 if FAST_TRAIN else 512,
     "batch"       : 32 if FAST_TRAIN else 16,
     "workers"     : 8,                  # more parallel data loading
@@ -48,7 +39,7 @@ CONFIG = {
 
     # ── Optimiser ─────────────────────────────────────────────────────────────
     "optimizer"   : "AdamW",            # AdamW converges faster than SGD
-    "lr0"         : 0.001,              # initial learning rate
+    "lr0"         : 0.0001,             # initial learning rate (reduced for stability)
     "lrf"         : 0.01,               # final LR = lr0 * lrf
     "momentum"    : 0.937,
     "weight_decay": 0.0005,
@@ -82,16 +73,16 @@ CONFIG = {
     "save_period" : -1 if FAST_TRAIN else 10,  # only save final checkpoints in fast mode
 
     # ── Evaluation & logging ──────────────────────────────────────────────────
-    "val"         : False if FAST_TRAIN else True,
-    "plots"       : False if FAST_TRAIN else True,
+    "val"         : True,               # always validate for monitoring
+    "plots"       : True,               # always plot
     "verbose"     : True,
     "project"     : str(RUNS_DIR),
-    "name"        : RUN_NAME,
+    "name"        : "yolo11l_wildlife_fire",
     "exist_ok"    : True,
 
     # ── Device ────────────────────────────────────────────────────────────────
     "device"      : 0,                 # GPU index (auto-fallback to CPU if unavailable)
-    "amp"         : True,              # Automatic Mixed Precision → faster + lower VRAM
+    "amp"         : False,             # Disabled to avoid NaN issues on mixed precision
 }
 
 # ──────────────────────────────── HELPERS ─────────────────────────────────────
@@ -213,7 +204,7 @@ def main():
         print("\n[INFO] Skipping test evaluation (missing best.pt or test split).")
 
     # ── Convenience copy of best model to project root ─────────────────────────
-    dest = BASE_DIR / f"best_{RUN_NAME}.pt"
+    dest = BASE_DIR / "best_yolo11l_wildlife_fire.pt"
     if best_pt.exists():
         shutil.copy2(best_pt, dest)
         print(f"\n  Best model copied to: {dest}")

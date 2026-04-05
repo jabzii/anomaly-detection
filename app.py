@@ -21,7 +21,7 @@ except Exception:
 
 # ─────────────────────────────── CONFIG ───────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "runs" / "train" / "yolo11l_wildlife_fire" / "weights" / "best.pt"
+MODEL_PATH = BASE_DIR / "runs" / "train" / "yolo11l_wildlife_fire" / "weights" / "epoch0.pt"
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
