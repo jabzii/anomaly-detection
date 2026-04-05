@@ -5,14 +5,14 @@ import glob
 
 
 datasets_config = [
-    {"name": "buffalo", "path": "datasets/buffalo", "class_map": {0: 0}},
-    {"name": "elephant", "path": "datasets/elephant-dataset-yolov", "class_map": {0: 1}},
-    {"name": "tiger", "path": "datasets/tiger", "class_map": {0: 2}},
-    {"name": "wild_boar", "path": "datasets/Wild Boar Dataset", "class_map": {0: 3}},
-    {"name": "fire_smoke", "path": "datasets/fire_smok", "class_map": {0: 4, 1: 5}}
+    {"name": "buffalo", "path": "datasets/buffalo", "class_map": {2: 2}},
+    {"name": "elephant", "path": "datasets/elephant-dataset-yolov", "class_map": {3: 3}},
+    {"name": "tiger", "path": "datasets/tiger", "class_map": {4: 4}},
+    {"name": "wild_boar", "path": "datasets/Wild Boar Dataset", "class_map": {5: 5}},
+    {"name": "fire_smoke", "path": "datasets/fire_smok", "class_map": {0: 0, 1: 1}}
 ]
 
-class_names = ["buffalo", "elephant", "tiger", "wild_boar", "fire", "smoke"]
+class_names = ["smoke", "fire", "buffalo", "elephant", "tiger", "wild_boar"]
 output_dir = "datasets/master_dataset"
 
 train_ratio = 0.7
