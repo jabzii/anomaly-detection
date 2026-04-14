@@ -33,7 +33,7 @@ CONFIG = {
     "epochs"      : 20 if FAST_TRAIN else 1000,
     "imgsz"       : 416 if FAST_TRAIN else 512,
     "batch"       : 32 if FAST_TRAIN else 16,
-    "workers"     : 8,                  # more parallel data loading
+    "workers"     : 0,                  # 0 to avoid LLVM OOM
     "rect"        : True,               # rectangular batches → removes padding waste
     "cache"       : "disk",             # reuse scan cache from previous run
 

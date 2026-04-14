@@ -35,6 +35,8 @@ def main() -> None:
         data=data_yaml,
         epochs=epochs,
         imgsz=imgsz,
+        workers=0,
+        name="balanced_model",
     )
 
 

@@ -50,3 +50,5 @@ master_dataset.zip
 .env
 checkmate/
 *.zip
+corrupted_data/
+master_dataset_excess/
