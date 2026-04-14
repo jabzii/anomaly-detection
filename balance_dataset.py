@@ -6,8 +6,41 @@ import shutil
 dataset_path = r"d:\anomaly-detection\master_dataset"
 excess_path = r"d:\anomaly-detection\master_dataset_excess"
 
-# Target number of images per class for each split based on the minority class (buffalo)
+print("Restoring any previously moved excess images...")
+for split in ["train", "val", "test"]:
+    excess_label_dir = os.path.join(excess_path, "labels", split)
+    excess_image_dir = os.path.join(excess_path, "images", split)
+    label_dir = os.path.join(dataset_path, "labels", split)
+    image_dir = os.path.join(dataset_path, "images", split)
+    
+    if os.path.exists(excess_label_dir) and os.path.exists(label_dir):
+        for f in os.listdir(excess_label_dir):
+            shutil.move(os.path.join(excess_label_dir, f), os.path.join(label_dir, f))
+    if os.path.exists(excess_image_dir) and os.path.exists(image_dir):
+        for f in os.listdir(excess_image_dir):
+            shutil.move(os.path.join(excess_image_dir, f), os.path.join(image_dir, f))
 
+print("Cleaning up old duplicates...")
+for split in ["train", "val", "test"]:
+    label_dir = os.path.join(dataset_path, "labels", split)
+    image_dir = os.path.join(dataset_path, "images", split)
+    if not os.path.exists(label_dir):
+        continue
+    for txt_file in glob.glob(os.path.join(label_dir, "*_dup*.txt")):
+        try:
+            os.remove(txt_file)
+        except OSError:
+            pass
+        name_no_ext = os.path.splitext(os.path.basename(txt_file))[0]
+        for ext in ['.jpg', '.jpeg', '.png', '.JPG', '.PNG']:
+            img_path = os.path.join(image_dir, name_no_ext + ext)
+            if os.path.exists(img_path):
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+
+# Target number of images per class for each split based on the majority class
 for split in ["train", "val", "test"]:
     label_dir = os.path.join(dataset_path, "labels", split)
     image_dir = os.path.join(dataset_path, "images", split)
@@ -15,12 +48,6 @@ for split in ["train", "val", "test"]:
     if not os.path.exists(label_dir):
         continue
         
-    excess_label_dir = os.path.join(excess_path, "labels", split)
-    excess_image_dir = os.path.join(excess_path, "images", split)
-    
-    os.makedirs(excess_label_dir, exist_ok=True)
-    os.makedirs(excess_image_dir, exist_ok=True)
-    
     # 1. Read all labels and map image -> set of classes
     image_classes = {}
     class_images = {c: [] for c in range(6)}
@@ -47,67 +74,57 @@ for split in ["train", "val", "test"]:
     if not txt_files: 
         continue
     
-    # 2. find minority class count
+    # 2. find majority class count
     counts = {c: len(imgs) for c, imgs in class_images.items() if len(imgs) > 0}
     if not counts:
         continue
         
-    min_c = min(counts, key=counts.get)
-    min_count = counts[min_c]
+    max_c = max(counts, key=counts.get)
+    max_count = counts[max_c]
     
     print(f"\n--- Split {split} ---")
-    print(f"Min class is {min_c} with {min_count} images.")
+    print(f"Max class is {max_c} with {max_count} images.")
     
-    # 3. Select images
-    selected_images = set()
-    class_current_counts = {c: 0 for c in range(6)}
+    # 3. Duplicate images
+    class_current_counts = counts.copy()
     
-    # First, shuffle all lists to ensure randomness
     for c in class_images:
         random.shuffle(class_images[c])
         
-    # We iteratively pick images for classes that haven't reached min_count
-    # Order classes by rarity to pick images for rare classes first
     sorted_classes = sorted(counts.keys(), key=lambda c: counts[c])
     
+    duplicate_count = 0
     for c in sorted_classes:
-        for basename in class_images[c]:
-            if class_current_counts[c] >= min_count:
-                break
-                
-            if basename not in selected_images:
-                # check if adding this image would exceed the targets significantly?
-                # since we are balancing, going a bit over min_count for other classes is unavoidable
-                # due to co-occurrence, but we stop strictly when class c reaches min_count.
-                selected_images.add(basename)
-                for occ in image_classes[basename]:
-                    class_current_counts[occ] += 1
-                    
-    print(f"Summary after selection:")
-    for c in range(6):
-        if len(class_images[c]) > 0:
-            print(f"  Class {c}: {class_current_counts[c]} images selected (out of original {counts.get(c, 0)})")
-        
-    # 4. Move unselected images
-    moved_count = 0
-    for txt_file in txt_files:
-        basename = os.path.basename(txt_file)
-        if basename not in selected_images:
-            # move txt
-            txt_src = os.path.join(label_dir, basename)
-            txt_dst = os.path.join(excess_label_dir, basename)
-            shutil.move(txt_src, txt_dst)
+        available_images = class_images[c]
+        if not available_images:
+            continue
             
-            # move img
+        while class_current_counts[c] < max_count:
+            basename = random.choice(available_images)
             name_no_ext = os.path.splitext(basename)[0]
+            
+            duplicate_count += 1
+            new_basename = f"{name_no_ext}_dup{duplicate_count}.txt"
+            
+            txt_src = os.path.join(label_dir, basename)
+            txt_dst = os.path.join(label_dir, new_basename)
+            shutil.copy(txt_src, txt_dst)
+            
             for ext in ['.jpg', '.jpeg', '.png', '.JPG', '.PNG']:
                 img_src = os.path.join(image_dir, name_no_ext + ext)
                 if os.path.exists(img_src):
-                    img_dst = os.path.join(excess_image_dir, name_no_ext + ext)
-                    shutil.move(img_src, img_dst)
+                    img_dst = os.path.join(image_dir, f"{name_no_ext}_dup{duplicate_count}{ext}")
+                    shutil.copy(img_src, img_dst)
                     break
-            moved_count += 1
-            
-    print(f"Moved {moved_count} unselected items to {excess_path}")
+                    
+            for occ in image_classes[basename]:
+                class_current_counts[occ] += 1
+                    
+    print(f"Summary after oversampling:")
+    for c in range(6):
+        if len(class_images[c]) > 0:
+            print(f"  Class {c}: {class_current_counts[c]} images (original {counts.get(c, 0)})")
+        
+    print(f"Duplicated {duplicate_count} items to match majority class.")
     
-print("\nDone bounding and moving excess images.")
+print("\nDone balancing dataset by oversampling.")
