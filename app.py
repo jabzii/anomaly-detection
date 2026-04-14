@@ -25,7 +25,7 @@ MODEL_PATH = BASE_DIR / "runs" / "detect" / "balanced_model" / "weights" / "best
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
-CONFIDENCE_THRESHOLD = 0.05  # VERY low for debugging
+CONFIDENCE_THRESHOLD = 0.65  # VERY low for debugging
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -142,12 +142,13 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
         if frame is None or frame.size == 0:
             return np.zeros((480, 640, 3), dtype=np.uint8)
 
-        results = model.predict(
-            source=frame,
-            conf=CONFIDENCE_THRESHOLD,
-            imgsz=640,
-            verbose=False,
-        )[0]
+        results = model.track(
+    source=frame,
+    persist=True, # Keeps track of objects across frames
+    conf=CONFIDENCE_THRESHOLD,    # You can safely lower this to 50% when tracking is on
+    imgsz=416,    # Make sure this matches your training imgsz
+    verbose=False,
+)[0]
         num_boxes = len(results.boxes)
 
         # Manual plotting for reliability in OpenCV stream

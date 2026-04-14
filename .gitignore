@@ -49,3 +49,4 @@ master_dataset.zip
 # Secrets
 .env
 checkmate/
+*.zip
