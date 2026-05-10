@@ -51,7 +51,7 @@ MODEL_PATH = BASE_DIR / "runs" / "detect" / "balanced_model" / "weights" / "best
 UPLOAD_FOLDER = BASE_DIR / "uploads"
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
-CONFIDENCE_THRESHOLD = 0.65  # VERY low for debugging
+CONFIDENCE_THRESHOLD = 0.80 # VERY low for debugging
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -94,6 +94,7 @@ class DetectionState:
         self.source: str = "none"
         self.running: bool = False
         self.animal_detection_enabled: bool = True
+        self.sms_sending_enabled: bool = True
 
         self.fire_detected: bool = False
         self.animal_detected: bool = False
@@ -176,7 +177,10 @@ def send_alert_sms(alert_type: str, labels: list[str], source: str):
 
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        unique_labels = list(dict.fromkeys(labels))   # preserve order, deduplicate
+        
+        # Replace specific animal names with "animal" for the SMS
+        display_labels = ["animal" if l in ANIMAL_CLASSES else l for l in labels]
+        unique_labels = list(dict.fromkeys(display_labels))   # preserve order, deduplicate
         label_str = ", ".join(l.upper() for l in unique_labels)
 
         if alert_type == "fire":
@@ -192,6 +196,10 @@ def send_alert_sms(alert_type: str, labels: list[str], source: str):
             f"Source: {source}\n"
             f"Time: {timestamp}"
         )
+
+        if not state.sms_sending_enabled:
+            print(f"[INFO] [{alert_type.upper()}] EVENT TRIGGERED but SMS SKIPPED (SMS is toggled OFF). Labels: {label_str}")
+            return
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         sms = client.messages.create(
@@ -511,6 +519,7 @@ def get_status():
             "detections": state.detections,
             "fps": round(state.fps, 1),
             "animal_detection_enabled": state.animal_detection_enabled,
+            "sms_sending_enabled": state.sms_sending_enabled,
         })
 
 @app.route("/enable_animal_detection", methods=["POST"])
@@ -523,7 +532,15 @@ def disable():
     with state.lock: state.animal_detection_enabled = False
     return jsonify({"status": "ok", "message": "Animal detection disabled"})
 
+@app.route("/toggle_sms", methods=["POST"])
+def toggle_sms():
+    req = request.get_json(silent=True) or {}
+    enable = req.get("enable", True)
+    with state.lock: state.sms_sending_enabled = bool(enable)
+    return jsonify({"status": "ok", "sms_sending_enabled": state.sms_sending_enabled})
+
 if __name__ == "__main__":
     print("Server starting...")
     sys.stdout.flush()
-    app.run(host="0.0.0.0", port=9000, threaded=True)
+    port = int(os.getenv("FLASK_PORT", 5000))
+    app.run(host="0.0.0.0", port=port, threaded=True)

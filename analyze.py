@@ -3,7 +3,7 @@ import glob
 from collections import defaultdict
 import json
 
-dataset_path = r"d:\anomaly-detection\master_dataset"
+dataset_path = r"master_dataset"
 results = {}
 
 for split in ["train", "val", "test"]:
