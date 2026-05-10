@@ -253,22 +253,23 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
             if label in FIRE_CLASSES:
                 fire_det = True
                 should_draw = True
-                color = (0, 0, 255)
+                color = (0, 0, 255)           # Red box for fire/smoke
                 print(f"[INFO] FIRE! {label} ({conf:.2f})")
-            if label in ANIMAL_CLASSES and state.animal_detection_enabled:
+
+            elif label in ANIMAL_CLASSES and state.animal_detection_enabled:
                 animal_det = True
                 should_draw = True
-                color = (255, 180, 0)
+                color = (255, 180, 0)         # Orange box for wildlife
                 print(f"[INFO] ANIMAL! {label} ({conf:.2f})")
 
-            if label not in FIRE_CLASSES and label not in ANIMAL_CLASSES:
-                should_draw = True
-
+            # Only draw boxes for fire and animal — skip all other classes
             if should_draw:
+                # Show "Animal" for wildlife, exact name for fire/smoke
+                display_label = "Animal" if label in ANIMAL_CLASSES else label
                 cv2.rectangle(plotted_frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     plotted_frame,
-                    f"{label} {conf:.2f}",
+                    f"{display_label} {conf:.2f}",
                     (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -276,12 +277,14 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
                     2,
                 )
 
-            max_conf = max(max_conf, conf)
-            frame_detections.append({
-                "label": label, 
-                "conf": round(conf * 100, 1), 
-                "bbox": [x1, y1, x2, y2]
-            })
+            # Track all detections for status API (even if not drawn)
+            if label in FIRE_CLASSES or (label in ANIMAL_CLASSES and state.animal_detection_enabled):
+                max_conf = max(max_conf, conf)
+                frame_detections.append({
+                    "label": label,
+                    "conf": round(conf * 100, 1),
+                    "bbox": [x1, y1, x2, y2]
+                })
 
         # Display metadata
         state.update_fps()
