@@ -9,10 +9,36 @@ import time
 import threading
 import numpy as np
 import sys
+import traceback
 from pathlib import Path
 from flask import Flask, Response, render_template, request, jsonify
 from ultralytics import YOLO
 import werkzeug
+
+# ── Load .env file automatically (so credentials don't need manual export) ──────
+def _load_dotenv(path: str = ".env"):
+    """Minimal .env loader – works without python-dotenv installed."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path)
+        print(f"[ENV] Loaded {path} via python-dotenv")
+        return
+    except ImportError:
+        pass
+    env_path = Path(__file__).resolve().parent / path
+    if not env_path.exists():
+        print(f"[ENV] No .env file found at {env_path}")
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip())
+    print(f"[ENV] Loaded {env_path} via built-in parser")
+
+_load_dotenv()
 
 try:
     from twilio.rest import Client
@@ -31,7 +57,12 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 ALERT_TO_PHONE_NUMBER = os.getenv("ALERT_TO_PHONE_NUMBER", "")
-SMS_COOLDOWN_SECONDS = int(os.getenv("SMS_COOLDOWN_SECONDS", "60"))
+SMS_COOLDOWN_SECONDS        = int(os.getenv("SMS_COOLDOWN_SECONDS", "60"))
+ANIMAL_SMS_COOLDOWN_SECONDS = int(os.getenv("ANIMAL_SMS_COOLDOWN_SECONDS", "120"))
+# Require this many consecutive frames before sending an SMS (avoids false positives)
+CONFIRMATION_FRAMES         = int(os.getenv("CONFIRMATION_FRAMES", "3"))
+# Collect all animal species appearing within this window into ONE SMS
+ANIMAL_BATCH_WINDOW_SECONDS = int(os.getenv("ANIMAL_BATCH_WINDOW_SECONDS", "5"))
 
 FIRE_CLASSES  = {"fire", "smoke"}
 ANIMAL_CLASSES = {"buffalo", "elephant", "tiger", "wild_boar"}
@@ -73,8 +104,19 @@ class DetectionState:
         self._fps_count = 0
         self.fps: float = 0.0
 
+        # ── Fire SMS state ──────────────────────────────────────────────────
         self.last_fire_alert_ts: float = 0.0
         self.fire_alert_sent_for_current_event: bool = False
+        self.fire_confirm_count: int = 0          # consecutive frames with fire
+
+        # ── Animal SMS state ────────────────────────────────────────────────
+        self.animal_confirm_count: dict  = {}    # label -> consecutive frame count
+        self.animal_alert_active: dict   = {}    # label -> bool (already in batch/sent)
+        self.last_global_animal_ts: float = 0.0  # global cooldown after any animal SMS
+        # Batch window: collect multiple species before firing one SMS
+        self.animal_batch_pending: bool  = False  # window is open
+        self.animal_batch_start_ts: float = 0.0   # when window opened
+        self.animal_batch_labels: set    = set()  # species queued in this batch
 
     def update_fps(self):
         self._fps_count += 1
@@ -98,20 +140,57 @@ def twilio_ready() -> bool:
     )
 
 
-def send_fire_sms_async(detections: list, source: str):
-    """Send Twilio SMS in background thread when fire/smoke is detected."""
+def print_sms_diagnostics():
+    """Print a full readiness report at startup so misconfiguration is obvious."""
+    print("\n" + "═" * 55)
+    print("  SMS / TWILIO DIAGNOSTICS")
+    print("═" * 55)
+    print(f"  twilio package   : {'✅ installed' if Client is not None else '❌ NOT installed  →  pip install twilio'}")
+    print(f"  ACCOUNT_SID      : {'✅ ' + TWILIO_ACCOUNT_SID[:8] + '...' if TWILIO_ACCOUNT_SID else '❌ MISSING'}")
+    print(f"  AUTH_TOKEN       : {'✅ set' if TWILIO_AUTH_TOKEN else '❌ MISSING'}")
+    print(f"  FROM number      : {'✅ ' + TWILIO_PHONE_NUMBER if TWILIO_PHONE_NUMBER else '❌ MISSING'}")
+    print(f"  TO number        : {'✅ ' + ALERT_TO_PHONE_NUMBER if ALERT_TO_PHONE_NUMBER else '❌ MISSING'}")
+    print(f"  Fire cooldown    : {SMS_COOLDOWN_SECONDS}s")
+    print(f"  Animal cooldown  : {ANIMAL_SMS_COOLDOWN_SECONDS}s (global, after each batch)")
+    print(f"  Animal batch win : {ANIMAL_BATCH_WINDOW_SECONDS}s (multi-species collected here)")
+    print(f"  Confirm frames   : {CONFIRMATION_FRAMES} consecutive frames needed")
+    print(f"  Overall ready    : {'✅ SMS ENABLED' if twilio_ready() else '❌ SMS DISABLED'}")
+    print("═" * 55 + "\n")
+
+
+def send_alert_sms(alert_type: str, labels: list[str], source: str):
+    """
+    Unified SMS sender for fire AND animal alerts.
+    alert_type : "fire" | "animal" | "fire+animal"
+    labels     : list of detected class names e.g. ["fire", "tiger"]
+    source     : "camera" | "video" | "rtsp"
+
+    Strategy to save credits:
+    - One SMS per event (confirmation threshold already applied before calling this).
+    - If fire+animal detected simultaneously, batched into a SINGLE message.
+    - Runs in a background daemon thread — never blocks video pipeline.
+    """
     if not twilio_ready():
         print("[WARN] SMS not sent: Twilio not configured or package missing.")
         return
 
     try:
-        fire_labels = [d.get("label", "fire") for d in detections if d.get("label") in FIRE_CLASSES]
-        fire_label = fire_labels[0] if fire_labels else "fire"
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        unique_labels = list(dict.fromkeys(labels))   # preserve order, deduplicate
+        label_str = ", ".join(l.upper() for l in unique_labels)
+
+        if alert_type == "fire":
+            prefix = "🔥 FIRE/SMOKE ALERT"
+        elif alert_type == "animal":
+            prefix = "🐾 WILDLIFE ALERT"
+        else:                          # fire+animal combined
+            prefix = "🔥🐾 FIRE + WILDLIFE ALERT"
+
         msg = (
-            f"ALERT: {fire_label.upper()} detected. "
-            f"Source: {source}. Time: {timestamp}. "
-            f"Confidence threshold: {CONFIDENCE_THRESHOLD}."
+            f"{prefix}\n"
+            f"Detected: {label_str}\n"
+            f"Source: {source}\n"
+            f"Time: {timestamp}"
         )
 
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
@@ -120,9 +199,10 @@ def send_fire_sms_async(detections: list, source: str):
             from_=TWILIO_PHONE_NUMBER,
             to=ALERT_TO_PHONE_NUMBER,
         )
-        print(f"[INFO] Fire SMS sent. SID: {sms.sid}")
+        print(f"[INFO] [{alert_type.upper()}] SMS sent. SID: {sms.sid} | Labels: {label_str}")
     except Exception as e:
-        print(f"[ERROR] Failed to send fire SMS: {e}")
+        print(f"[ERROR] Failed to send SMS: {e}")
+        traceback.print_exc()
 
 # ─────────────────────────────── LOAD MODEL ───────────────────────────────────
 print(f"[INFO] Loading model from: {MODEL_PATH}")
@@ -134,6 +214,8 @@ try:
 except Exception as e:
     print(f"[ERROR] Could not load model: {e}")
     sys.exit(1)
+
+print_sms_diagnostics()
 
 # ─────────────────────────────── FRAME GENERATOR ─────────────────────────────
 
@@ -210,30 +292,130 @@ def process_frame(frame: np.ndarray) -> np.ndarray:
             cv2.rectangle(plotted_frame, (0, 0), (plotted_frame.shape[1], 50), (0, 0, 255), -1)
             cv2.putText(plotted_frame, "!!! FIRE DETECTED !!!", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
-        trigger_sms = False
+        # ── SMS Trigger Logic ─────────────────────────────────────────────────
+        # Strategy: require CONFIRMATION_FRAMES consecutive frames before sending
+        # any SMS. This eliminates false positives and wastes zero credits on
+        # transient noise. Fire and each animal class are tracked independently.
+        sms_payload = None   # (alert_type, labels) — set only when we should send
+
+        # Collect detected labels this frame
+        fire_labels_this_frame   = [d["label"] for d in frame_detections if d["label"] in FIRE_CLASSES]
+        animal_labels_this_frame = [d["label"] for d in frame_detections
+                                    if d["label"] in ANIMAL_CLASSES] if state.animal_detection_enabled else []
+
         with state.lock:
-            state.fire_detected = fire_det
+            state.fire_detected   = fire_det
             state.animal_detected = animal_det
-            state.confidence = max_conf * 100
-            state.detections = frame_detections
-
+            state.confidence      = max_conf * 100
+            state.detections      = frame_detections
             now = time.time()
-            cooldown_ok = (now - state.last_fire_alert_ts) >= SMS_COOLDOWN_SECONDS
-
-            if fire_det and not state.fire_alert_sent_for_current_event and cooldown_ok:
-                state.last_fire_alert_ts = now
-                state.fire_alert_sent_for_current_event = True
-                trigger_sms = True
-
-            if not fire_det:
-                state.fire_alert_sent_for_current_event = False
-
             current_source = state.source
 
-        if trigger_sms:
+            # ── Fire confirmation & cooldown ─────────────────────────────────
+            if fire_det:
+                state.fire_confirm_count += 1
+            else:
+                state.fire_confirm_count = 0
+                state.fire_alert_sent_for_current_event = False   # reset for next event
+
+            fire_cooldown_ok  = (now - state.last_fire_alert_ts) >= SMS_COOLDOWN_SECONDS
+            fire_confirmed    = state.fire_confirm_count >= CONFIRMATION_FRAMES
+            fire_ready_to_sms = (fire_det and fire_confirmed
+                                 and not state.fire_alert_sent_for_current_event
+                                 and fire_cooldown_ok)
+
+            # ── Fire debug log (only when fire is actively detected) ──────────
+            if fire_det:
+                cooldown_remaining = max(0, SMS_COOLDOWN_SECONDS - (now - state.last_fire_alert_ts))
+                print(
+                    f"[SMS-DBG][FIRE] confirm={state.fire_confirm_count}/{CONFIRMATION_FRAMES} "
+                    f"event_sent={state.fire_alert_sent_for_current_event} "
+                    f"cooldown_ok={fire_cooldown_ok} (remaining={cooldown_remaining:.0f}s) "
+                    f"→ {'WILL SEND' if fire_ready_to_sms else 'BLOCKED'}"
+                )
+
+            if fire_ready_to_sms:
+                state.last_fire_alert_ts = now
+                state.fire_alert_sent_for_current_event = True
+
+            # ── Animal confirmation + batch-window collection ─────────────────
+            # How it works:
+            #   1. Each species needs CONFIRMATION_FRAMES consecutive detections.
+            #   2. Once confirmed, it is added to animal_batch_labels and a
+            #      ANIMAL_BATCH_WINDOW_SECONDS timer starts (if not already running).
+            #   3. Any OTHER species confirmed during that window are added too.
+            #   4. When the window expires → ONE SMS with ALL collected species.
+            #   5. A global cooldown (ANIMAL_SMS_COOLDOWN_SECONDS) then applies
+            #      before any new animal batch can be triggered.
+            global_cooldown_ok = (now - state.last_global_animal_ts) >= ANIMAL_SMS_COOLDOWN_SECONDS
+
+            for lbl in ANIMAL_CLASSES:
+                # Update consecutive-frame counter
+                if lbl in animal_labels_this_frame:
+                    state.animal_confirm_count[lbl] = state.animal_confirm_count.get(lbl, 0) + 1
+                else:
+                    state.animal_confirm_count[lbl] = 0
+                    state.animal_alert_active[lbl]  = False   # gone → allow re-entry next time
+
+                confirmed    = state.animal_confirm_count.get(lbl, 0) >= CONFIRMATION_FRAMES
+                already_queued = state.animal_alert_active.get(lbl, False)
+
+                # Debug log when this species is visible
+                if lbl in animal_labels_this_frame:
+                    gc_remaining = max(0, ANIMAL_SMS_COOLDOWN_SECONDS - (now - state.last_global_animal_ts))
+                    print(
+                        f"[SMS-DBG][ANIMAL:{lbl}] "
+                        f"confirm={state.animal_confirm_count.get(lbl,0)}/{CONFIRMATION_FRAMES} "
+                        f"queued={already_queued} "
+                        f"global_cooldown_ok={global_cooldown_ok} (remaining={gc_remaining:.0f}s) "
+                        f"→ {'QUEUING' if (confirmed and not already_queued and global_cooldown_ok) else 'BLOCKED'}"
+                    )
+
+                # Queue species into the batch window if all conditions met
+                if (lbl in animal_labels_this_frame
+                        and confirmed
+                        and not already_queued
+                        and global_cooldown_ok):
+                    state.animal_batch_labels.add(lbl)
+                    state.animal_alert_active[lbl] = True   # don't double-queue
+                    if not state.animal_batch_pending:
+                        state.animal_batch_pending  = True
+                        state.animal_batch_start_ts = now
+                        print(
+                            f"[SMS-DBG] Animal batch window OPENED "
+                            f"(collecting for {ANIMAL_BATCH_WINDOW_SECONDS}s) "
+                            f"first species: {lbl}"
+                        )
+
+            # ── Check if batch window has expired → emit ONE combined SMS ──────
+            animal_ready_labels = []
+            if state.animal_batch_pending:
+                elapsed = now - state.animal_batch_start_ts
+                print(
+                    f"[SMS-DBG] Batch window: {elapsed:.1f}s / {ANIMAL_BATCH_WINDOW_SECONDS}s "
+                    f"| queued={sorted(state.animal_batch_labels)}"
+                )
+                if elapsed >= ANIMAL_BATCH_WINDOW_SECONDS:
+                    animal_ready_labels           = sorted(state.animal_batch_labels)
+                    state.animal_batch_labels     = set()
+                    state.animal_batch_pending    = False
+                    state.last_global_animal_ts   = now
+                    print(f"[SMS-DBG] Batch window CLOSED → sending 1 SMS for: {animal_ready_labels}")
+
+            # ── Merge fire + animal into fewest possible SMS messages ──────────
+            if fire_ready_to_sms and animal_ready_labels:
+                sms_payload = ("fire+animal", fire_labels_this_frame + animal_ready_labels)
+            elif fire_ready_to_sms:
+                sms_payload = ("fire", fire_labels_this_frame)
+            elif animal_ready_labels:
+                sms_payload = ("animal", animal_ready_labels)
+
+        if sms_payload:
+            alert_type, labels = sms_payload
+            print(f"[SMS] Dispatching {alert_type.upper()} alert → labels={labels} source={current_source}")
             threading.Thread(
-                target=send_fire_sms_async,
-                args=(frame_detections, current_source),
+                target=send_alert_sms,
+                args=(alert_type, labels, current_source),
                 daemon=True,
             ).start()
 
@@ -341,4 +523,4 @@ def disable():
 if __name__ == "__main__":
     print("Server starting...")
     sys.stdout.flush()
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    app.run(host="0.0.0.0", port=9000, threaded=True)
